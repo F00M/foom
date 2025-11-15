@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LZ AutoExecute (safe: MetaMask signs)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+<style>
+  body{font-family:system-ui,Arial;margin:12px;background:#07130a;color:#e8f3e9}
+  .card{max-width:720px;margin:0 auto;padding:14px;border-radius:10px;background:#08140c}
+  button{padding:10px;border-radius:8px;border:0;background:#22c55e;color:#03110a;font-weight:700;cursor:pointer}
+  pre{background:#031009;padding:10px;border-radius:8px;white-space:pre-wrap}
+  .row{display:flex;gap:8px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Auto-scan → Execute (MetaMask) — Safe</h2>
+  <div id="info">Init...</div>
+  <div style="margin-top:8px;">
+    <button id="btnConnect">Connect MetaMask</button>
+    <button id="btnRefresh">Refresh Pending</button>
+  </div>
+
+  <h3>Pending messages</h3>
+  <div id="list">(no pending yet)</div>
+
+  <h3>Log</h3>
+  <pre id="log">log ready...</pre>
+</div>
+
+<script>
+const API_BASE = "https://YOUR_BACKEND_HOST_OR_CODESPACE_URL"; // e.g. https://abcd-3000.preview.app.github.dev  or https://yourhost.com
+const EXECUTOR_CONTRACT = "0x701f3927871EfcEa1235dB722f9E608aE120d243"; // executor contract used previously
+const DST_EID = 40374; // Stable testnet EID
+
+const $ = id => document.getElementById(id);
+const logEl = $("log");
+function log(m){ logEl.textContent += "\n"+m; logEl.scrollTop = logEl.scrollHeight; console.log(m); }
+
+let provider, signer, myAddress;
+async function connect(){
+  if(!window.ethereum) return alert("Install MetaMask mobile or wallet with dApp browser");
+  await window.ethereum.request({ method:"eth_requestAccounts" });
+  provider = new ethers.providers.Web3Provider(window.ethereum, "any");
+  signer = provider.getSigner();
+  myAddress = await signer.getAddress();
+  $("info").innerText = `Connected: ${myAddress}`;
+  log("Connected: "+myAddress);
+}
+
+async function fetchPending(){
+  try{
+    $("list").innerHTML = "loading...";
+    const r = await fetch(API_BASE + "/pending");
+    const j = await r.json();
+    if(!j.ok) { $("list").innerText = "Backend error"; log(JSON.stringify(j)); return; }
+    if(j.count === 0){ $("list").innerText = "No pending messages"; return; }
+    const rows = j.results.map(r => renderRow(r)).join("\n");
+    $("list").innerHTML = rows;
+  }catch(e){ $("list").innerText = "Fetch error"; log("fetch pending error: "+e); }
+}
+
+function renderRow(r){
+  const short = r.srcTxHash ? r.srcTxHash.slice(0,10) + "…" : "no-tx";
+  const sender = r.sender32 ? r.sender32.slice(0,10)+"…" : "no-sender";
+  const payloadLen = r.payload ? ((r.payload.length-2)/2)+" bytes" : "no-payload";
+  // button calls executeWithMeta(txhash)
+  return `<div style="margin:8px 0;padding:8px;border-radius:8px;background:#081b12">
+    <div><b>${short}</b> — ${r.statusSummary || ""}</div>
+    <div style="font-size:12px;color:#9fdab0">${sender} | ${payloadLen}</div>
+    <div style="margin-top:6px">
+      <button onclick="executeFromBackend('${r.srcTxHash}')">Execute (MetaMask)</button>
+      &nbsp;<a style="color:#a8f5c4" href="${r.lzTxPage}" target="_blank">view LZScan</a>
+    </div>
+  </div>`;
+}
+
+// When user clicks Execute: fetch payload from backend (one message) and call lzReceive via MetaMask
+async function executeFromBackend(srcTxHash){
+  try{
+    if(!signer) { alert("Connect wallet first"); return; }
+    log("Preparing execute for tx: "+srcTxHash);
+    // fetch pending list and find the message
+    const r = await fetch(API_BASE + "/pending");
+    const j = await r.json();
+    const msg = (j.results || []).find(x => x.srcTxHash === srcTxHash);
+    if(!msg) { alert("Message not found (maybe already executed)"); return; }
+
+    if(!msg.sender32 || !msg.payload){ alert("Missing sender/payload — cannot execute"); return; }
+
+    // ensure user is on Sepolia (the lzReceive call must be sent from Sepolia)
+    const network = await provider.getNetwork();
+    if(network.chainId !== 11155111){
+      try{
+        await window.ethereum.request({ method:"wallet_switchEthereumChain", params:[{chainId:"0xaa36a7"}] });
+        log("Switched to Sepolia.");
+      }catch(e){
+        log("Switch chain failed: "+e.message);
+      }
+    }
+
+    // Call lzReceive on executor contract (user signs & pays gas)
+    const EXECUTOR_ABI = ["function lzReceive(uint32,bytes32,bytes,address) external"];
+    const execContract = new ethers.Contract(EXECUTOR_CONTRACT, EXECUTOR_ABI, signer);
+    const tx = await execContract.lzReceive(DST_EID, msg.sender32, msg.payload, EXECUTOR_CONTRACT, { gasLimit: 1000000 });
+    log("MetaMask tx sent: "+tx.hash);
+    await tx.wait();
+    log("Executed tx mined: "+tx.hash);
+    // refresh pending list
+    fetchPending();
+  }catch(e){
+    log("Execute error: "+(e.message||e));
+  }
+}
+
+$("btnConnect").onclick = connect;
+$("btnRefresh").onclick = fetchPending;
+
+// initial
+log("Frontend ready. Set API_BASE in top of file and open in MetaMask browser.");
+fetchPending();
+</script>
+</body>
+</html>
